@@ -21,7 +21,7 @@ COLUMNS = [
 ]
 DAY_MAP = {'M': 0, 'T': 1, 'W': 2, 'Th': 3, 'F': 4, 'S': 5, 'Su': 6}
 
-# --- STATE MEMORY FIX FOR DOWNLOAD BUTTONS ---
+# --- STATE MEMORY FIX ---
 if "files_ready" not in st.session_state:
     st.session_state.files_ready = False
 if "ics_data" not in st.session_state:
@@ -32,6 +32,17 @@ if "file_name_base" not in st.session_state:
     st.session_state.file_name_base = "Roster"
 
 # --- HELPER FUNCTIONS ---
+def get_pdf_start_date(roster_file):
+    try:
+        with pdfplumber.open(roster_file) as pdf:
+            text = pdf.pages[0].extract_text()
+            date_match = re.search(r'(\d{2}/\d{2}/\d{4})', text)
+            if date_match:
+                return datetime.strptime(date_match.group(1), "%d/%m/%Y")
+    except:
+        pass
+    return datetime.now()
+
 def get_turn_code(turn_val, prefix):
     if not turn_val: return ""
     cleaned = turn_val.replace('\n', ' ').strip()
@@ -118,8 +129,8 @@ def lookup_smart_diagram(diagram_library, turn_code, weekday_index):
         for (lib_code, day_idx), text in diagram_library.items():
             if day_idx == weekday_index and lib_code.endswith(base_num): return text
         for (lib_code, day_idx), text in diagram_library.items():
-            if lib_code.endswith(base_num): return text + "\n\n[Note: This diagram might be for a different day variation as an exact day match wasn't found.]"
-    return f"Duty: {turn_code}\n(No diagram found for this duty in the provided document)"
+            if lib_code.endswith(base_num): return text + "\n\n[Note: Exact day match wasn't found.]"
+    return f"Duty: {turn_code}\n(No diagram found)"
 
 def calculate_diagram_totals(diagram_text):
     lines = diagram_text.split('\n')
@@ -181,7 +192,6 @@ def create_fridge_pdf(weeks_data, prefix):
     pdf.set_auto_page_break(auto=False, margin=0) 
     pdf.add_page()
     
-    # Title
     pdf.set_font("Helvetica", 'B', 16)
     pdf.cell(0, 8, txt=f"My {prefix} Roster", ln=True, align='C')
     pdf.ln(2)
@@ -192,7 +202,6 @@ def create_fridge_pdf(weeks_data, prefix):
     wc_w = 15 
     col_w = (usable_width - wc_w) / 7 
     
-    # --- Extreme PDF Math ---
     num_weeks = len(weeks_data) if len(weeks_data) > 0 else 1
     page1_avail = 256 
     page2_avail = 266 
@@ -202,17 +211,12 @@ def create_fridge_pdf(weeks_data, prefix):
         test_h = h / 10.0
         p1_rows = int(page1_avail // test_h)
         p2_rows = int(page2_avail // test_h)
-        
-        if p1_rows >= num_weeks:
-            row_h = test_h
-            break
-        elif (p1_rows + p2_rows) >= num_weeks:
+        if p1_rows >= num_weeks or (p1_rows + p2_rows) >= num_weeks:
             row_h = test_h
             break
             
     main_font_size = max(4.0, min(7.5, row_h * 0.55))
     
-    # Draw Headers
     pdf.set_font("Helvetica", 'B', 8)
     pdf.set_x(left_margin)
     pdf.cell(wc_w, 6, "W/C", border=1, align='C')
@@ -221,7 +225,6 @@ def create_fridge_pdf(weeks_data, prefix):
     pdf.ln()
 
     for week in weeks_data:
-        # Strict Page Break Trigger
         if pdf.get_y() + row_h > 282: 
             pdf.add_page()
             pdf.set_font("Helvetica", 'B', 8)
@@ -233,8 +236,6 @@ def create_fridge_pdf(weeks_data, prefix):
 
         y = pdf.get_y()
         pdf.set_x(left_margin)
-        
-        # W/C Box 
         wc_date = week.get('wc_date', '')[:5] 
         wk_num = week.get('wk_num', '')
         
@@ -242,76 +243,51 @@ def create_fridge_pdf(weeks_data, prefix):
         pdf.set_xy(left_margin, y)
         pdf.cell(wc_w, row_h, "", border=1, fill=True)
         
-        if wk_num:
-            # Stack the W/C Date and the Roster Line number
-            line_spacing = main_font_size / 2.5
-            block_height = line_spacing * 2
-            start_y = y + (row_h - block_height) / 2
-            
-            pdf.set_font("Helvetica", 'B', main_font_size)
-            pdf.set_xy(left_margin, start_y)
-            pdf.cell(wc_w, line_spacing, wc_date, align='C')
-            
-            pdf.set_font("Helvetica", '', main_font_size * 0.9)
-            pdf.set_xy(left_margin, start_y + line_spacing)
-            pdf.cell(wc_w, line_spacing, f"Line {wk_num}", align='C')
-        else:
-            pdf.set_font("Helvetica", 'B', main_font_size)
-            pdf.set_xy(left_margin, y + (row_h/2) - (main_font_size/4)) 
-            pdf.cell(wc_w, main_font_size/2, wc_date, align='C')
+        line_spacing = main_font_size / 2.5
+        pdf.set_font("Helvetica", 'B', main_font_size)
+        pdf.set_xy(left_margin, y + (row_h/2) - line_spacing)
+        pdf.cell(wc_w, line_spacing, wc_date, align='C')
+        pdf.set_font("Helvetica", '', main_font_size * 0.8)
+        pdf.set_xy(left_margin, y + (row_h/2))
+        pdf.cell(wc_w, line_spacing, f"Line {wk_num}", align='C')
 
-        # Day Boxes
         for i, day in enumerate(days):
             x = left_margin + wc_w + (i * col_w)
             shift = week.get(day, {})
             duty = shift.get('duty', '')
 
-            # Color coding logic
-            if "RD" in duty:
+            if "RD" in duty: 
                 pdf.set_fill_color(225, 225, 225) 
             elif shift.get('on'):
                 try:
                     on_hr = int(shift['on'].split(':')[0])
-                    if on_hr < 11 or (on_hr == 11 and int(shift['on'].split(':')[1]) < 30):
-                        pdf.set_fill_color(210, 240, 255) 
+                    if on_hr < 11:
+                        pdf.set_fill_color(210, 240, 255)
                     else:
-                        pdf.set_fill_color(255, 230, 200) 
-                except:
+                        pdf.set_fill_color(255, 230, 200)
+                except: 
                     pdf.set_fill_color(255, 255, 255)
-            else:
+            else: 
                 pdf.set_fill_color(255, 255, 255)
 
-            # Draw background cell
             pdf.set_xy(x, y)
             pdf.cell(col_w, row_h, "", border=1, fill=True)
             
-            # Draw Text
             if duty:
                 if "RD" in duty:
                     pdf.set_xy(x, y + (row_h/2) - (main_font_size/4))
-                    pdf.set_font("Helvetica", 'B', main_font_size + 1)
+                    pdf.set_font("Helvetica", 'B', main_font_size)
                     pdf.cell(col_w, main_font_size/2, duty, align='C')
                 elif shift.get('on'):
-                    # Mathematically center the 3 lines of text
-                    line_spacing = main_font_size / 2.5
-                    block_height = line_spacing * 3
-                    start_y = y + (row_h - block_height) / 2
-                    
+                    start_y = y + (row_h - (line_spacing * 3)) / 2
                     pdf.set_font("Helvetica", 'B', main_font_size)
-                    pdf.set_xy(x, start_y)
-                    pdf.cell(col_w, line_spacing, duty, align='C')
-
+                    pdf.set_xy(x, start_y); pdf.cell(col_w, line_spacing, duty, align='C')
                     pdf.set_font("Helvetica", '', main_font_size)
-                    pdf.set_xy(x, start_y + line_spacing)
-                    pdf.cell(col_w, line_spacing, f"{shift['on']}-{shift['off']}", align='C')
+                    pdf.set_xy(x, start_y + line_spacing); pdf.cell(col_w, line_spacing, f"{shift['on']}-{shift['off']}", align='C')
+                    pdf.set_xy(x, start_y + (line_spacing * 2)); pdf.cell(col_w, line_spacing, f"({shift['total']})", align='C')
 
-                    pdf.set_xy(x, start_y + (line_spacing * 2))
-                    pdf.cell(col_w, line_spacing, f"({shift['total']})", align='C')
-
-        # Advance exactly down to the next row
         pdf.set_xy(left_margin, y + row_h)
 
-    # Save to memory bytes
     with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
         pdf.output(tmp.name)
         with open(tmp.name, 'rb') as f:
@@ -319,49 +295,86 @@ def create_fridge_pdf(weeks_data, prefix):
     os.remove(tmp.name)
     return pdf_bytes
 
-# Custom function for micro HTML code blocks with perfect newline handling
 def small_code(text):
     safe_text = html.escape(text)
-    st.markdown(f"""
-        <div style='font-family: monospace; font-size: 11px; line-height: 1.4; padding: 10px; 
-        border-radius: 5px; background-color: rgba(128, 128, 128, 0.1); color: inherit; 
-        overflow-x: auto; white-space: pre-wrap;'>{safe_text}</div>
-    """, unsafe_allow_html=True)
+    st.markdown(f"<div style='font-family: monospace; font-size: 11px; line-height: 1.4; padding: 10px; border-radius: 5px; background-color: rgba(128, 128, 128, 0.1); color: inherit; overflow-x: auto; white-space: pre-wrap;'>{safe_text}</div>", unsafe_allow_html=True)
 
 # --- WEB APP UI ---
 st.set_page_config(page_title="Roster Lite", page_icon="🚆")
+
+# HEADER & INSTRUCTIONS
 st.title("🚆 Roster Lite: iCal Creator")
-st.write("Upload your base roster to instantly generate a perfect smartphone calendar and printable fridge roster.")
+
+st.markdown("""
+Welcome to **Roster Lite**! This web app takes your PDF base rosters and duty diagrams and instantly converts them into a smartphone-ready calendar (.ics) and a printable Fridge Roster (.pdf).
+""")
+
+st.warning("""
+**⚠️ IMPORTANT DISCLAIMERS:**
+* **Base Roster Only:** This app only generates your shifts based on the *long-term base roster*. It will **not** automatically update with changes from the short-term Daily or Weekly rosters. You must still check those manually when published.
+* **Check Accuracy:** Always verify the generated calendar against your official roster before relying on it for your duties.
+* **iPhone Calendar:** When you open the downloaded `.ics` file on an iPhone, it will add the shifts to your *Default Calendar*. To change this, go to your iPhone **Settings > Calendar > Default Calendar** before opening the file.
+""")
+
+with st.expander("📖 Open User Guide & Instructions"):
+    st.markdown("""
+    ### Step-by-Step Instructions
+    
+    **Step 1: Upload Documents**
+    * **Base Roster PDF:** Upload the grid showing your link's base roster (it can be 1 or 2 pages depending on the number of lines).
+    * **Master Diagram (Large PDF):** If you want detailed notes (like train working times), upload the Master Diagram document here. *(Note: This must be a single file. If you have multiple diagram PDFs, please combine them first. This upload box only appears if you select calendar features that require it).*
+
+    **Step 2: Base Roster Settings**
+    * **Start Week No (Your Line):** Enter the line number you are currently working.
+    * **Duty Prefix / Link:** Enter your link identifier (e.g., **BID**).
+    * **Date you are on this Line:** This is your anchor point. Enter the exact **Sunday** you are working the line number you entered above. As soon as you upload your Base Roster, the app will automatically find the official start date and put it in this box for you. You only need to manually change this date if you are moving links or starting mid-timetable.
+    * **Timetable End Date:** Set the date the current timetable expires.
+
+    **Step 3: Calendar Customization**
+    *Customize exactly what information gets saved into your calendar events using the checkboxes. Uncheck everything for a purely minimal calendar.*
+    * **Duty Diagram Notes:** Copies your exact step-by-step train working and break times into the event description.
+    * **Time Summary:** Calculates and prints your total driving, passing, and PNB times at the bottom of the event notes.
+    * **PNB in Event Title:** Adds your PNB start time and duration directly to the event title so you can view it from your lock screen.
+
+    **Step 4: Generate & Download**
+    Once you are happy with your settings, click the blue **Generate Files** button.
+    * **📅 Download Calendar (.ics):** Tap this to add the shifts to your phone's calendar app.
+    * **🖨️ Download Fridge Roster (.pdf):** Tap this to view or print your color-coded weekly shift grid.
+    """)
+
+st.divider()
 
 # --- 1. CORE ROSTER DETAILS ---
 st.header("1. Base Roster Settings")
-st.write("Upload your 1-page grid and set your base dates.")
-roster_file = st.file_uploader("Upload Base Roster (1-page PDF)", type=["pdf"])
+st.write("Upload your base roster grid and set your dates.")
+roster_file = st.file_uploader("Upload Base Roster PDF", type=["pdf"])
 
-col1, col2, col3 = st.columns(3)
+# Extract default date if file uploaded
+default_start = get_pdf_start_date(roster_file) if roster_file else datetime.now()
+
+col1, col2 = st.columns(2)
 with col1:
-    week_no = st.number_input("Start Week No (Line):", min_value=1, value=1)
-with col2:
+    week_no = st.number_input("Start Week No (Your Line):", min_value=1, value=1)
     prefix = st.text_input("Duty Prefix / Link:", value="BID").strip().upper()
-with col3:
+with col2:
+    user_start_date = st.date_input("Date you are on this Line (Must be a Sunday):", value=default_start)
     end_date_input = st.date_input("Timetable End Date:", value=datetime(2026, 12, 12))
 
+st.caption("*ℹ️ **How this works:** Enter your Line number and the exact Sunday you are working that line. By default, this jumps to the official start date of the Base Roster when uploaded.*")
+
 st.markdown("#### Default Output")
-st.caption("*By default, if you uncheck all options below, your calendar event title will look purely minimal like this:*")
+st.caption("*By default, if you uncheck all customization options below, your calendar event title will look purely minimal like this:*")
 small_code("15:15 23:58 BID3 157 (08:43)")
 
 st.divider()
 
-# --- 2. CALENDAR CUSTOMIZATION & DIAGRAMS ---
+# --- 2. CALENDAR CUSTOMIZATION ---
 st.header("2. Calendar Customization")
-st.write("Select the details you want included in your calendar notes and titles.")
-
 st.markdown("#### 📝 Duty Diagram Features")
-
 c1, c2 = st.columns([1.5, 1])
 with c1:
     opt_diagram = st.checkbox("Include full Duty Diagram in calendar notes", value=True)
-    st.caption("*Pastes your step-by-step train working instructions directly into the event description.*")
+    st.caption("*Pastes step-by-step train working into notes.*")
 with c2:
     small_code("""Duty: BID3 157    [FO]
 ----------------------------
@@ -370,66 +383,56 @@ Barnham 16.17
 RW Barnham 16.29 16.31 1C40 OBS
 Pmth&Ssea 17.19 17.33 1C55 OBS
 AP Horsham 18.47
-PASS Horsham 18.51 1B55 SAME...""")
-
-st.write("") # Spacer
+PASS Horsham 18.51 1B55 SAME
+T Bds 19.04
+RW T Bds 19.13 19.14 1C54 OBS
+RAPD Horsham 19.27
+PNB
+RWPA Horsham 20.41 20.50 1B63 QL, Sel OBS
+TC Vic (C) 21.45
+PC Vic (C) 22.59 1W52 QL, Sel OBS
+Gat Ap 23.29 23.31 1W52
+TC Brighton 23.57""")
 
 c1, c2 = st.columns([1.5, 1])
 with c1:
     opt_math = st.checkbox("Include Time Summary in calendar notes", value=False)
-    st.caption("*Calculates and adds up your total driving, passing, and break times at the bottom of the event notes.*")
+    st.caption("*Calculates driving/break totals.*")
 with c2:
-    small_code("Drive: 246m | Pass: 62m | Wait/Walking: 127m | PNB: 74m | ECS & Shunt: 0m")
-
-st.write("") # Spacer
+    small_code("Drive: 246m | Pass: 62m | Wait: 127m | PNB: 74m")
 
 c1, c2 = st.columns([1.5, 1])
 with c1:
     opt_pnb_title = st.checkbox("Include PNB time & length in Event Title", value=False)
-    st.caption("*Adds your break start-time and duration to the end of the event title so you can see it on your lock screen.*")
+    st.caption("*See breaks on your lock screen.*")
 with c2:
     small_code("15:15 23:58 BID3 157 (08:43) (PNB 1927 74)")
 
-# Contextual Diagram Upload Logic
 needs_diagram = opt_diagram or opt_math or opt_pnb_title
-
 if needs_diagram:
-    st.info("💡 To generate diagram notes and math, please upload your Master Diagram PDF:")
+    st.info("💡 Please upload your Master Diagram PDF. *(Note: If your diagrams are across multiple files, please combine them into one PDF first)*:")
     diagram_file = st.file_uploader("Upload Master Diagram (Large PDF)", type=["pdf"])
 else:
     diagram_file = None
 
 st.divider()
-
 st.markdown("#### 📅 Extra Features")
 c1, c2 = st.columns([1.5, 1])
 with c1:
     opt_weekly_sum = st.checkbox("Generate a '📋 Weekly Summary' event on Sundays", value=True)
-    st.caption("*Creates an all-day event every Sunday listing your shifts for the upcoming week at a glance.*")
+    st.caption("*View your whole week in one event.*")
 with c2:
-    small_code("""Sun: RD Sunday
-Mon: RD
-Tue: RD
-Wed: 14:00 23:23 A/R (09:23)
-Thu: 14:00 23:23 A/R (09:23)
-Fri: 15:15 23:58 BID3 157 (08:43) (PNB 1927 74)
-Sat: 14:25 23:48 A/R (09:23)""")
+    small_code("Sun: RD Sunday\nMon: RD\nTue: RD\nWed: 14:00 23:23 A/R (09:23)...")
 
 opt_pdf = st.checkbox("Generate a printable 'Fridge Roster' PDF", value=True)
-st.caption("*Creates a secondary, color-coded PDF download that lists all your shifts and Line Numbers in a perfectly scaled grid.*")
-
-st.divider()
 
 # --- 3. SHIFT ALERTS ---
 st.header("3. Shift Alerts")
 opt_alarms = st.checkbox("Set automated shift wake-up alarms", value=False)
-st.caption("*Automatically triggers a push notification on your phone before your shift starts.*")
 if opt_alarms:
     col_a, col_b = st.columns(2)
-    with col_a:
-        early_alarm = st.number_input("Early Shifts (< 11:30) Alert Mins:", min_value=0, value=90)
-    with col_b:
-        late_alarm = st.number_input("Late Shifts (>= 11:30) Alert Mins:", min_value=0, value=105)
+    with col_a: early_alarm = st.number_input("Early Shifts (< 11:30) Alert Mins:", min_value=0, value=90)
+    with col_b: late_alarm = st.number_input("Late Shifts (>= 11:30) Alert Mins:", min_value=0, value=105)
 
 st.divider()
 
@@ -437,43 +440,33 @@ if st.button("Generate Files", type="primary"):
     if not roster_file:
         st.error("⚠️ Please upload the Base Roster PDF.")
     elif needs_diagram and not diagram_file:
-        st.error("⚠️ Please upload the Master Diagram to calculate your diagram notes/summaries.")
+        st.error("⚠️ Please upload the Master Diagram.")
+    elif user_start_date.weekday() != 6:
+        st.error("⚠️ Please change 'Date you are on this Line' to a Sunday. The calendar engine requires weeks to start on Sundays.")
     else:
-        with st.spinner("Processing Documents & Calculating Shifts..."):
+        with st.spinner("Calculating Shifts..."):
             try:
-                # Parse Library conditionally
-                if needs_diagram:
-                    diagram_library = build_smart_diagram_library(diagram_file, prefix)
-                else:
-                    diagram_library = {}
+                diagram_library = build_smart_diagram_library(diagram_file, prefix) if needs_diagram else {}
                 
                 with pdfplumber.open(roster_file) as pdf:
-                    first_page_text = pdf.pages[0].extract_text()
-                    date_match = re.search(r'(\d{2}/\d{2}/\d{4})', first_page_text)
-                    start_date = datetime.strptime(date_match.group(1), "%d/%m/%Y")
-                    
                     all_data = []
                     for page in pdf.pages:
                         for table in page.extract_tables():
                             for row in table[2:]:
-                                if row and row[0] is not None and len(row) == len(COLUMNS): 
-                                    all_data.append(row)
+                                if row and row[0] is not None and len(row) == len(COLUMNS): all_data.append(row)
 
                 roster_data = {int(r[0]): dict(zip(COLUMNS, r)) for r in all_data if str(r[0]).isdigit()}
                 
+                start_date = datetime.combine(user_start_date, datetime.min.time())
                 target_date = datetime.combine(end_date_input, datetime.min.time())
                 total_weeks = len(roster_data)
                 total_days = (target_date - start_date).days + 1
                 total_weeks_needed = math.ceil(total_days / 7)
 
-                # Set dynamically generated filename base
-                safe_date_str = start_date.strftime('%d-%m-%Y')
-                st.session_state.file_name_base = f"{prefix}_Line_{week_no}_{safe_date_str}"
+                st.session_state.file_name_base = f"{prefix}_Line_{week_no}_{start_date.strftime('%d-%m-%Y')}"
 
                 ics_lines = ["BEGIN:VCALENDAR", "VERSION:2.0", "PRODID:-//Smart Roster Lite//EN", "CALSCALE:GREGORIAN"]
-                days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
-                
-                current_week_summary = []
+                days_list = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
                 pdf_roster_data_grid = []
 
                 for i in range(total_weeks_needed):
@@ -482,14 +475,11 @@ if st.button("Generate Files", type="primary"):
                     row = roster_data.get(wk_num)
                     if not row: continue
                     
-                    week_dict = {
-                        'wc_date': current_week_start.strftime('%d/%m/%y'),
-                        'wk_num': wk_num
-                    }
+                    week_dict = {'wc_date': current_week_start.strftime('%d/%m/%y'), 'wk_num': wk_num}
+                    current_week_summary = []
 
-                    for day_idx, day in enumerate(days):
+                    for day_idx, day in enumerate(days_list):
                         current_date = current_week_start + timedelta(days=day_idx)
-                        
                         if current_date > target_date: break
                             
                         on_val = str(row[f"{day}_On"]).strip()
@@ -501,104 +491,54 @@ if st.button("Generate Files", type="primary"):
                             summary = "RD Sunday" if day == 'Sun' else "RD"
                             ics_lines.extend(["BEGIN:VEVENT", f"DTSTART;VALUE=DATE:{current_date.strftime('%Y%m%d')}", f"SUMMARY:{summary}", "END:VEVENT"])
                             current_week_summary.append(f"{day}: {summary}")
-                            
                             week_dict[day] = {'duty': summary, 'on': '', 'off': '', 'total': ''}
                             continue
 
-                        if not on_val or on_val == 'None': 
-                            week_dict[day] = {}
-                            continue
+                        if not on_val or on_val == 'None': continue
 
                         turn_code = get_turn_code(turn_val, prefix)
-                        
-                        raw_diagram = ""
-                        math_summary_str = ""
-                        pnb_title_str = ""
-                        if needs_diagram:
-                            raw_diagram = lookup_smart_diagram(diagram_library, turn_code, current_date.weekday())
-                            pnb_title_str, math_summary_str = calculate_diagram_totals(raw_diagram)
+                        raw_diagram = lookup_smart_diagram(diagram_library, turn_code, current_date.weekday()) if needs_diagram else ""
+                        pnb_title_str, math_summary_str = calculate_diagram_totals(raw_diagram) if needs_diagram else ("", "")
 
                         on_time_clean = re.sub(r'[^0-9\.\+:]', '', on_val.split()[0]).replace('.',':').replace('+',':').replace('::',':')
                         off_time_clean = re.sub(r'[^0-9\.\+:]', '', off_val.split()[0]).replace('.',':').replace('+',':').replace('::',':')
+                        if len(on_time_clean) == 4 and ":" not in on_time_clean: on_time_clean = f"{on_time_clean[:2]}:{on_time_clean[2:]}"
+                        if len(off_time_clean) == 4 and ":" not in off_time_clean: off_time_clean = f"{off_time_clean[:2]}:{off_time_clean[2:]}"
                         
-                        if len(on_time_clean) == 4 and ":" not in on_time_clean: 
-                            on_time_clean = f"{on_time_clean[:2]}:{on_time_clean[2:]}"
-                        if len(off_time_clean) == 4 and ":" not in off_time_clean: 
-                            off_time_clean = f"{off_time_clean[:2]}:{off_time_clean[2:]}"
-                        
-                        week_dict[day] = {
-                            'duty': turn_code, 
-                            'on': on_time_clean, 'off': off_time_clean, 'total': total_val
-                        }
-
-                        final_pnb_title = pnb_title_str if opt_pnb_title else ""
-                        title = f"{on_time_clean} {off_time_clean} {turn_code} ({total_val}){final_pnb_title}"
+                        week_dict[day] = {'duty': turn_code, 'on': on_time_clean, 'off': off_time_clean, 'total': total_val}
+                        title = f"{on_time_clean} {off_time_clean} {turn_code} ({total_val}){pnb_title_str if opt_pnb_title else ''}"
                         current_week_summary.append(f"{day}: {title}")
 
                         desc_parts = []
                         if opt_diagram and raw_diagram: desc_parts.append(raw_diagram.replace('\n', '\\n').replace(',', '\\,'))
                         if opt_math and math_summary_str: desc_parts.append(math_summary_str)
-                        
-                        desc_final = "\\n----------------------------\\n".join(desc_parts) if desc_parts else ""
+                        desc_final = "\\n----------------------------\\n".join(desc_parts)
 
                         try:
                             on_dt = datetime.strptime(f"{current_date.strftime('%Y%m%d')} {on_time_clean}", "%Y%m%d %H:%M")
                             off_dt = datetime.combine(current_date + (timedelta(days=1) if off_time_clean < on_time_clean else timedelta(0)), datetime.strptime(off_time_clean, "%H:%M").time())
-
-                            ics_lines.extend(["BEGIN:VEVENT", f"DTSTART:{on_dt.strftime('%Y%m%dT%H%M%S')}", f"DTEND:{off_dt.strftime('%Y%m%dT%H%M%S')}"])
-                            ics_lines.extend([f"SUMMARY:{title}"])
+                            ics_lines.extend(["BEGIN:VEVENT", f"DTSTART:{on_dt.strftime('%Y%m%dT%H%M%S')}", f"DTEND:{off_dt.strftime('%Y%m%dT%H%M%S')}", f"SUMMARY:{title}"])
                             if desc_final: ics_lines.append(f"DESCRIPTION:{desc_final}")
-
                             if opt_alarms:
                                 alarm_mins = early_alarm if on_dt.time() < datetime.strptime("11:30", "%H:%M").time() else late_alarm
-                                ics_lines.extend(["BEGIN:VALARM", "ACTION:DISPLAY", "DESCRIPTION:Shift Reminder", f"TRIGGER:-PT{alarm_mins}M", "END:VALARM"])
+                                ics_lines.extend(["BEGIN:VALARM", "ACTION:DISPLAY", "DESCRIPTION:Reminder", f"TRIGGER:-PT{alarm_mins}M", "END:VALARM"])
                             ics_lines.append("END:VEVENT")
-                        except Exception: continue
+                        except: continue
                     
-                    if len(week_dict) > 2: # At least one day data exists + wc_date + wk_num
-                        pdf_roster_data_grid.append(week_dict)
-
+                    if len(week_dict) > 2: pdf_roster_data_grid.append(week_dict)
                     if opt_weekly_sum and current_week_summary:
-                        sun_date = current_week_start
-                        if sun_date <= target_date:
-                            sum_text = "\\n".join(current_week_summary)
-                            ics_lines.extend(["BEGIN:VEVENT", f"DTSTART;VALUE=DATE:{sun_date.strftime('%Y%m%d')}", f"SUMMARY:📋 Weekly Summary - Line {wk_num}", f"DESCRIPTION:{sum_text}", "END:VEVENT"])
-                        current_week_summary = []
+                        sum_text = "\\n".join(current_week_summary)
+                        ics_lines.extend(["BEGIN:VEVENT", f"DTSTART;VALUE=DATE:{current_week_start.strftime('%Y%m%d')}", f"SUMMARY:📋 Weekly Summary - Line {wk_num}", f"DESCRIPTION:{sum_text}", "END:VEVENT"])
 
                 ics_lines.append("END:VCALENDAR")
-                
-                # --- SAVE TO MEMORY ---
                 st.session_state.ics_data = "\n".join(ics_lines)
-                if opt_pdf:
-                    st.session_state.pdf_data = create_fridge_pdf(pdf_roster_data_grid, prefix)
-                else:
-                    st.session_state.pdf_data = None
-                    
+                st.session_state.pdf_data = create_fridge_pdf(pdf_roster_data_grid, prefix) if opt_pdf else None
                 st.session_state.files_ready = True
+            except Exception as e: st.error(f"Error: {e}")
 
-            except Exception as e:
-                st.error(f"An error occurred: {e}")
-
-# --- DISPLAY PERSISTENT DOWNLOAD BUTTONS ---
 if st.session_state.files_ready:
-    st.success("✅ Files successfully generated! You can safely download both below.")
-    
-    col_dl1, col_dl2 = st.columns(2)
-    with col_dl1:
-        st.download_button(
-            label="📅 Download Calendar (.ics)",
-            data=st.session_state.ics_data,
-            file_name=f"{st.session_state.file_name_base}.ics",
-            mime="text/calendar",
-            use_container_width=True
-        )
-    
+    st.success("✅ Files Ready!")
+    c_dl1, c_dl2 = st.columns(2)
+    with c_dl1: st.download_button("📅 Calendar (.ics)", st.session_state.ics_data, f"{st.session_state.file_name_base}.ics", "text/calendar", use_container_width=True)
     if st.session_state.pdf_data:
-        with col_dl2:
-            st.download_button(
-                label="🖨️ Download Fridge Roster (.pdf)",
-                data=st.session_state.pdf_data,
-                file_name=f"{st.session_state.file_name_base}.pdf",
-                mime="application/pdf",
-                use_container_width=True
-            )
+        with c_dl2: st.download_button("🖨️ Fridge Roster (.pdf)", st.session_state.pdf_data, f"{st.session_state.file_name_base}.pdf", "application/pdf", use_container_width=True)
